@@ -1,10 +1,5 @@
 
-# Variabilité des fronts du Courant Circumpolaire Antarctique (ACC)
- 
-Code d'analyse développé dans le cadre d'un mémoire de master portant sur la position et la variabilité des fronts océaniques du Courant Circumpolaire
-Antarctique (ACC), à partir de données d'observation altimétrique et de sorties d'un modèle océanique haute résolution.
- 
-## Structure du dépôt
+## Structure du dépôt pour le mémoire : Variabilité des fronts du Courant Circumpolaire Antarctique (ACC)
  
 ### Position moyenne
 | Script | Rôle |
@@ -16,9 +11,9 @@ Antarctique (ACC), à partir de données d'observation altimétrique et de sorti
  
 | Script | Rôle |
 |--------|------|
-| `FRONT_VARIABILITY_V5.py` | **Pipeline principal.** Détection des fronts sur moyennes annuelles de SSH, correction d'un mode commun large échelle, séries temporelles, cartes de variabilité, exports CSV/NetCDF |
-| `FRONT_VAR_MEAN_PLUS.py` | Comparaison méthodologique : niveaux SSH **fixes** (Kim & Orsi 2014) vs **annuels recalibrés**, validation par gradient SSH et vitesse géostrophique, désaisonnalisation |
-| `FRONT_REGIONAL_V1.py` | Analyse de la variabilité **régionale** par zones géographiques (bassin Pacifique Sud, zone de fracture d'Udintsev, dorsale Est-Pacifique…) |
+| `FRONT_VARIABILITY_V5.py` | Pipeline principal. sétection des fronts sur moyennes annuelles de SSH, correction d'un mode commun large échelle, séries temporelles, cartes de variabilité, exports CSV/NetCDF |
+| `FRONT_VAR_MEAN_PLUS.py` | Comparaison méthodologique : niveaux SSH fixes vs annuels recalibrés, validation par gradient SSH et vitesse géostrophique, désaisonnalisation |
+| `FRONT_REGIONAL_V1.py` | Analyse de la variabilité régionale par zones géographiques (bassin Pacifique Sud, zone de fracture d'Udintsev, dorsale Est-Pacifique…) |
 | `FRONT_SCHIAVON_NEMO.py` | Identification des fronts selon Sokolov & Rintoul (2009a) : histogrammes SSH pondérés par le gradient `|∇η|`, par secteurs longitudinaux |
  
 ### Validation et modes climatiques
