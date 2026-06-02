@@ -137,7 +137,7 @@ def fig_region_selection(profiles_df, zones, label, outdir):
     fig.suptitle(
         f"Profils σ_f(λ) et zones sélectionnées — {label}\n"
         f"Zones en jaune = régions retenues pour l'analyse régionale",
-        fontsize=10, fontweight="bold")
+        fontsize=15, fontweight="bold")
 
     for ax, front in zip(axes, FRONTS):
         sub = profiles_df[profiles_df["front"] == front]
@@ -157,17 +157,18 @@ def fig_region_selection(profiles_df, zones, label, outdir):
             l1, l2 = zcfg["lon"]
             ax.axvspan(l1, l2, color="gold", alpha=0.30, zorder=0)
             ax.text((l1 + l2) / 2, y_max, zname,
-                    ha="center", va="top", fontsize=7, color="#555",
+                    ha="center", va="top", fontsize=15, color="#555",
                     bbox=dict(fc="white", ec="none", alpha=0.6, pad=1))
 
-        ax.set_ylabel("σ (km)", fontsize=8)
-        ax.set_title(front, fontsize=9, fontweight="bold", loc="left")
-        ax.legend(fontsize=7, loc="upper right")
+        ax.set_ylabel("σ (km)", fontsize=15)
+        ax.set_title(front, fontsize=17, fontweight="bold", loc="left")
+        ax.legend(fontsize=15, loc="upper right")
+        ax.tick_params(labelsize=15)
         ax.set_xlim(-180, 180)
         ax.set_ylim(bottom=0)
         ax.grid(True, alpha=0.3)
 
-    axes[-1].set_xlabel("Longitude (°E)", fontsize=9)
+    axes[-1].set_xlabel("Longitude (°E)", fontsize=17)
     fname = f"{outdir}region_selection_{label}.png"
     plt.tight_layout()
     plt.savefig(fname, dpi=CFG["fig_dpi"], bbox_inches="tight")
@@ -398,8 +399,7 @@ def fig_zone(zname, zcfg, diags_obs, diags_nemo, comp_dict, outdir):
         ax.axvspan(y1_cp, y2_cp, color="lightgrey", alpha=0.35, zorder=0,
                    label=f"Période commune ({y1_cp}–{y2_cp})")
         ax.axhline(0, color="gray", lw=0.6, alpha=0.5)
-        ax.invert_yaxis()
-        ax.set_ylabel("Anomalie (km)\n[+ = vers le Nord]", fontsize=9)
+        ax.set_ylabel("Anomalie (km)\n[+ = vers le Nord]", fontsize=11)
         ax.set_title(front, fontsize=10, fontweight="bold",
                      color=col, loc="left")
         ax.legend(fontsize=8, loc="upper right", framealpha=0.8)
@@ -441,24 +441,38 @@ def fig_zone(zname, zcfg, diags_obs, diags_nemo, comp_dict, outdir):
     plt.close()
     print(f"  → {fname}")
 
-
 # =============================================================================
 # 7.  FIGURE SYNTHÈSE TOUTES ZONES
 # =============================================================================
 
+# Ordre d'affichage des zones (haut → bas) :
+#   haut   : Pacifique Sud, Pacifique Est
+#   centre : Drake, Campbell, Kerguelen
+#   bas    : Fracture Udintsev, Atlantique Sud-Ouest
+SUMMARY_ZONE_ORDER = [
+    "PacSud", "EPacifique",            # haut
+    "Drake", "Campbell", "Kerguelen",  # centre
+    "UFZ", "AtlSudOuest",              # bas
+]
+
+
 def fig_summary_all_zones(all_results, outdir):
     """
     Grille compacte : 1 ligne par zone, 1 colonne par front.
-    Anomalie en km, OBS trait plein, NEMO tirets.
+    Anomalie en km, Nord vers le haut, OBS trait plein, NEMO tirets.
+    L'ordre des zones suit SUMMARY_ZONE_ORDER.
     """
-    zone_keys = list(all_results.keys())
+    # Ordre explicite ; on ne garde que les zones réellement analysées,
+    # et on ajoute en fin celles éventuellement absentes de la liste.
+    zone_keys  = [z for z in SUMMARY_ZONE_ORDER if z in all_results]
+    zone_keys += [z for z in all_results if z not in zone_keys]
+
     n_z = len(zone_keys)
     n_f = len(FRONTS)
 
     fig, axes = plt.subplots(n_z, n_f, figsize=(5 * n_f, 3.0 * n_z),
                              sharex=False, sharey=False)
     axes = np.atleast_2d(axes)
-
 
     for i_z, zk in enumerate(zone_keys):
         zres  = all_results[zk]
@@ -477,7 +491,6 @@ def fig_summary_all_zones(all_results, outdir):
                 d = diags[front]
 
                 if ds_label == "OBS":
-                    ref = d["phi_mean_deg"]
                     anom = d["anom_km"]
                     ls, lw, ms = "-", 1.8, 3.5
                 else:
@@ -494,7 +507,7 @@ def fig_summary_all_zones(all_results, outdir):
                 plotted = True
 
             ax.axhline(0, color="gray", lw=0.5, alpha=0.5)
-            ax.invert_yaxis()
+            # Nord vers le haut : pas d'inversion d'axe
             ax.grid(True, alpha=0.2)
             ax.axvspan(*CFG["common_period"], color="lightgrey",
                        alpha=0.3, zorder=0)
@@ -502,7 +515,8 @@ def fig_summary_all_zones(all_results, outdir):
             if i_z == 0:
                 ax.set_title(front, fontsize=11, fontweight="bold", color=col)
             if i_f == 0:
-                ax.set_ylabel(f"{zlab}\n({lon1}°–{lon2}°)\nanom. (km)", fontsize=7)
+                ax.set_ylabel(f"{zlab}\n({lon1}°–{lon2}°)\nanom. km  (+ = N)",
+                              fontsize=11)        # ← agrandi (était 7)
             if i_z == n_z - 1:
                 ax.set_xlabel("Année", fontsize=8)
             if plotted:
@@ -516,7 +530,6 @@ def fig_summary_all_zones(all_results, outdir):
     plt.savefig(fname, dpi=CFG["fig_dpi"], bbox_inches="tight")
     plt.close()
     print(f"  → {fname}")
-
 
 # =============================================================================
 # 8.  EXPORT CSV

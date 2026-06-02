@@ -46,6 +46,9 @@ CFG = {
     "nemo_ssh_file"  : "zos_1991_2023_IS.nc",
     "nemo_mask_file" : "Transport_sv/mask_continent.nc",
 
+    # Période commune OBS / NEMO pour la comparaison de σ
+    "common_period" : (2002, 2018),
+
     # Variables OBS
     "obs_ssh_var"    : "dot",
     "obs_mask_var"   : "land_mask",
@@ -213,15 +216,23 @@ def load_nemo(cfg):
     print(f"OK ({_t.time()-t0:.1f}s)")
 
     # ── Poids baryentriques (1 fois) ───────────────────────────────────────
+    # Calcul direct depuis tri.simplices (préinstancié) pour éviter
+    # tri.transform qui force le calcul de tous les ~700k simplexes.
     t0 = _t.time()
     print(f"  Poids baryentriques... ", end="", flush=True)
     simp  = tri.find_simplex(target)
     valid = simp >= 0
-    T     = tri.transform[simp[valid], :2, :]
-    t_ref = tri.transform[simp[valid],  2, :]
-    b2    = np.einsum('nij,nj->ni', T, target[valid] - t_ref)
-    bary  = np.column_stack([b2, 1 - b2.sum(1)])   # (N_v, 3)
-    verts = tri.simplices[simp[valid]]              # (N_v, 3)
+    verts = tri.simplices[simp[valid]]              # (N_v, 3) — indices source
+    pts   = np.column_stack([lons, lats])           # (N_src, 2)
+    p0    = pts[verts[:, 0]]
+    p1    = pts[verts[:, 1]]
+    p2    = pts[verts[:, 2]]
+    tgt   = target[valid]
+    d1    = p1 - p0;  d2 = p2 - p0;  dt = tgt - p0
+    det   = d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]
+    b1    = (dt[:, 0] * d2[:, 1] - dt[:, 1] * d2[:, 0]) / det
+    b2    = (d1[:, 0] * dt[:, 1] - d1[:, 1] * dt[:, 0]) / det
+    bary  = np.column_stack([1 - b1 - b2, b1, b2]) # (N_v, 3)
     print(f"OK ({_t.time()-t0:.1f}s) — {valid.sum():,}/{len(target):,} pts")
 
     # ── Lecture disque unique ──────────────────────────────────────────────
@@ -449,7 +460,144 @@ def compute_variability(ann_pos, label=""):
               f"p={pv_mean:.3f}")
     return result
 
+def sigma_profile_period(phi_da, year_range, min_years=4):
+    """
+    σ(λ) de la position du front, restreint à une fenêtre d'années.
+    Comparaison équitable OBS/NEMO : on impose la même période aux deux,
+    sinon NEMO (33 ans) capte des basses fréquences absentes des 17 ans OBS.
+    Retourne DataArray(lon) en km.
+    """
+    y1, y2 = year_range
+    years  = phi_da["year"].values
+    sel    = (years >= y1) & (years <= y2)
+    sub    = phi_da.values[sel, :]                  # (n_sel, lon)
+    n_ok   = np.isfinite(sub).sum(axis=0)
+    sigma  = np.where(n_ok >= min_years, np.nanstd(sub, axis=0), np.nan)
+    return xr.DataArray(sigma * DEG2KM, dims=["lon"],
+                        coords={"lon": phi_da["lon"].values}, name="sigma_km")
 
+
+def compare_sigma_obs_nemo(res_obs, res_nemo, outdir):
+    """
+    Compare σ_f(λ) OBS vs NEMO sur la période commune.
+      - σ recalculé sur la fenêtre commune (cf. sigma_profile_period)
+      - NEMO interpolé sur la grille longitudinale OBS (grilles différentes :
+        OBS ~1°, NEMO regrillé 0.5°)
+      - par front :
+          * Pearson r        : coïncidence des maxima (insensible à un
+                               facteur multiplicatif → mesure de FORME)
+          * pente à l'origine: σ_N = a·σ_O → amplification globale (AMPLITUDE)
+          * ratio ponctuel   : médiane + dispersion → amplification uniforme ?
+    """
+    y1, y2 = CFG["common_period"]
+    print(f"\n{'='*62}")
+    print(f"  COMPARAISON σ(λ) OBS vs NEMO — période commune {y1}–{y2}")
+    print(f"{'='*62}")
+
+    rows = []
+    fig, axes = plt.subplots(len(FRONTS), 1, figsize=(10, 3.4 * len(FRONTS)))
+    axes = np.atleast_1d(axes)
+
+    for i_f, front in enumerate(FRONTS):
+        sig_obs  = sigma_profile_period(res_obs["ann_corr"][front],  (y1, y2))
+        sig_nemo = sigma_profile_period(res_nemo["ann_corr"][front], (y1, y2))
+
+        # NEMO → grille longitudinale OBS (grilles différentes)
+        sig_nemo_i = sig_nemo.interp(lon=sig_obs["lon"], method="linear")
+
+        o, n = sig_obs.values, sig_nemo_i.values
+        lon  = sig_obs["lon"].values
+        ok   = np.isfinite(o) & np.isfinite(n) & (o > 0)
+        n_ok = int(ok.sum())
+
+        if n_ok < 5:
+            print(f"  {front}: trop peu de longitudes communes ({n_ok}) — ignoré")
+            rows.append({"Front": front, "N_lon_commun": n_ok})
+            continue
+
+        ov, nv, lonv = o[ok], n[ok], lon[ok]
+
+        # Corrélation de FORME (insensible à un facteur multiplicatif)
+        r, pval = stats.pearsonr(ov, nv)
+
+        # AMPLITUDE : pente à l'origine σ_N = a·σ_O
+        slope0 = np.sum(ov * nv) / np.sum(ov * ov)
+        # Régression libre (avec ordonnée à l'origine) — info complémentaire
+        sl, it, _, _, _ = stats.linregress(ov, nv)
+
+        # Ratio ponctuel : amplification uniforme le long de λ ?
+        ratio     = nv / ov
+        ratio_med = np.median(ratio)
+        ratio_std = np.std(ratio)
+        unif      = ("uniforme" if ratio_std < 0.4 * ratio_med
+                     else "variable selon λ")
+
+        rows.append({
+            "Front"             : front,
+            "Periode_commune"   : f"{y1}-{y2}",
+            "N_lon_commun"      : n_ok,
+            "Pearson_r"         : f"{r:+.3f}",
+            "Pearson_pval"      : f"{pval:.4f}",
+            "Amplification_aN"  : f"{slope0:.2f}",
+            "Pente_libre"       : f"{sl:.2f}",
+            "Ordonnee_libre_km" : f"{it:+.1f}",
+            "Ratio_median"      : f"{ratio_med:.2f}",
+            "Ratio_dispersion"  : f"{ratio_std:.2f}",
+            "Amplification_type": unif,
+            "Sigma_obs_moy_km"  : f"{np.mean(ov):.1f}",
+            "Sigma_nemo_moy_km" : f"{np.mean(nv):.1f}",
+        })
+
+        print(f"\n  {front}")
+        print(f"    Pearson r              : {r:+.3f}  (p={pval:.4f} — "
+              f"⚠ peu fiable : σ(λ) autocorrélé en longitude)")
+        print(f"    Amplification a (σ_N=a·σ_O) : {slope0:.2f}")
+        print(f"    Ratio ponctuel médian  : {ratio_med:.2f} "
+              f"(dispersion ±{ratio_std:.2f}) → {unif}")
+
+        # ── Profil σ(λ) superposés + ratio ──────────────────────────────
+        ax = axes[i_f]
+        # OBS : tracé seulement là où des données existent (NaN → rupture naturelle)
+        ax.plot(lon, o, color=FRONT_COLORS[front], lw=1.5, label="σ OBS")
+        # NEMO : tracé sur toute la grille longitudinale OBS
+        ax.plot(lon, n, color=FRONT_COLORS[front], lw=1.3, ls="--",
+                label="σ NEMO")
+        ax.fill_between(lon, o, n,
+                        where=np.isfinite(o) & np.isfinite(n),
+                        color=FRONT_COLORS[front], alpha=0.12)
+        ax.set_xlabel("Longitude (°E)", fontsize=8)
+        ax.set_ylabel("σ (km)", fontsize=8)
+        ax.set_xlim(-180, 180); ax.set_ylim(bottom=0)
+        ax.set_title(f"{front} — profils σ(λ)  r={r:+.2f}  a={slope0:.2f}",
+                     fontsize=9, fontweight="bold", loc="left")
+        ax.legend(fontsize=11, loc="upper left")
+        ax.grid(True, alpha=0.3)
+
+        axr = ax.twinx()
+        axr.plot(lonv, ratio, color="0.4", lw=0.7, alpha=0.7)
+        axr.axhline(ratio_med, color="0.4", ls=":", lw=0.8)
+        axr.set_ylabel("ratio σ_N/σ_O", fontsize=7, color="0.4")
+        axr.tick_params(axis="y", labelsize=6, colors="0.4")
+        axr.set_ylim(0, max(4, np.nanmax(ratio) * 1.1))
+
+    fig.suptitle(
+        f"Comparaison de la variabilité σ_f(λ) — OBS vs NEMO  "
+        f"(période commune {y1}–{y2})\n"
+        f"Profils : coïncidence des maxima + uniformité du ratio",
+        fontsize=10, fontweight="bold")
+
+    fname_fig = f"{outdir}sigma_comparison_OBS_NEMO.png"
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(fname_fig, dpi=CFG["fig_dpi"], bbox_inches="tight")
+    plt.close()
+    print(f"\n  → {fname_fig}")
+
+    df = pd.DataFrame(rows)
+    fname_csv = f"{outdir}sigma_comparison_OBS_NEMO.csv"
+    df.to_csv(fname_csv, index=False, sep=";")
+    print(f"  → {fname_csv}")
+    print(f"{'='*62}\n")
+    return df
 # =============================================================================
 # 6.  FIGURES
 # =============================================================================
@@ -466,8 +614,8 @@ def _base_map_ax(fig, rect=111):
                       draw_labels=True)
     gl.top_labels   = False
     gl.right_labels = False
-    gl.xlabel_style = {"size": 8, "color": "#333"}
-    gl.ylabel_style = {"size": 8, "color": "#333"}
+    gl.xlabel_style = {"size": 20, "color": "#333"}
+    gl.ylabel_style = {"size": 20, "color": "#333"}
     ax.set_xlabel("Longitude (°E)", fontsize=9, labelpad=18)
     ax.set_ylabel("Latitude (°N)",  fontsize=9, labelpad=30)
     return ax
@@ -538,7 +686,8 @@ def fig_spaghetti(ann_pos_raw, ann_pos_corr, cm_info, label, outdir):
         sm = plt.cm.ScalarMappable(cmap=cmap_t, norm=norm_t)
         sm.set_array([])
         cb = fig.colorbar(sm, ax=ax, pad=0.02, shrink=0.85, aspect=25)
-        cb.set_label("Année", fontsize=9)
+        cb.set_label("Année", fontsize=14)
+        cb.ax.tick_params(labelsize=15)
         cb.ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=6))
 
         trend_str = (f"Mode commun : {cm_info['trend_mm_yr']:+.1f} mm/an  "
@@ -603,7 +752,8 @@ def fig_variability_map(ann_pos, mean_pos, lon_arr, var_dict, label, outdir):
     sm = plt.cm.ScalarMappable(cmap=cmap_v, norm=norm_v)
     sm.set_array([])
     cb = fig.colorbar(sm, ax=ax, pad=0.02, shrink=0.85, aspect=25)
-    cb.set_label("Variabilité interannuelle — std (km)", fontsize=9)
+    cb.set_label("Variabilité interannuelle — std (km)", fontsize=14)
+    cb.ax.tick_params(labelsize=15)
 
     ax.set_title(
         f"Position moyenne des fronts ACC et variabilité interannuelle — {label}\n"
@@ -618,61 +768,67 @@ def fig_variability_map(ann_pos, mean_pos, lon_arr, var_dict, label, outdir):
     print(f"  → {fname}")
 
 
-def fig_circumpolar_timeseries(ann_pos_raw, ann_pos_corr, cm_info, label, outdir):
+def fig_circumpolar_timeseries_combined(res_obs, res_nemo, outdir):
     """
-    Fig 3 (diagnostic secondaire) : latitude moyenne circumpolaire par année.
-    Montre avant/après correction du mode commun.
-    Avertissement : la moyenne circumpolaire peut masquer les contrastes régionaux.
+    Série temporelle circumpolaire OBS et NEMO corrigés sur la même figure.
+    Un sous-graphe par front, deux séries (OBS trait plein, NEMO tirets),
+    tendances et annotations centrées en bas de chaque sous-graphe.
     """
-    # Couleurs spécifiques aux séries temporelles
     TS_COLORS = {"SAF": "crimson", "PF": "royalblue", "SACCF": "forestgreen"}
+    STYLES = {
+        "OBS":  {"ls": "-",  "marker": "o", "alpha": 0.9},
+        "NEMO": {"ls": "--", "marker": "s", "alpha": 0.75},
+    }
 
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
     fig.suptitle(
-        f"Série temporelle circumpolaire moyenne des fronts ACC — {label}\n"
-        f"⚠ Diagnostic secondaire : la moyenne circumpolaire peut masquer "
-        f"des contrastes régionaux",
+        "Série temporelle circumpolaire moyenne des fronts ACC — OBS vs NEMO\n"
+        "⚠ Diagnostic secondaire : la moyenne circumpolaire peut masquer "
+        "des contrastes régionaux",
         fontsize=10, fontweight="bold")
 
     for ax, front in zip(axes, FRONTS):
-        col = TS_COLORS[front]   # couleur dédiée aux séries temporelles
+        col = TS_COLORS[front]
+        trend_texts = []
 
-        for ann_pos, style, lname in [
-            (ann_pos_raw,  "-",  "Brut"),
-            (ann_pos_corr, "--", "Corrigé mode commun"),
-        ]:
-            if ann_pos is None:
+        for label, ann_corr in [("OBS", res_obs["ann_corr"]),
+                                 ("NEMO", res_nemo["ann_corr"])]:
+            if ann_corr is None:
                 continue
-            phi_da = ann_pos[front]
+            phi_da = ann_corr[front]
             years  = phi_da["year"].values.astype(float)
-            lat_cp = np.nanmean(phi_da.values, axis=1)   # moyenne sur longitudes
+            lat_cp = np.nanmean(phi_da.values, axis=1)
+            st = STYLES[label]
 
-            ax.plot(years, lat_cp * DEG2KM * 0 + lat_cp,   # valeur en °
-                    color=col, ls=style, lw=1.5, alpha=0.9,
-                    label=lname, marker="o", ms=3)
+            ax.plot(years, lat_cp,
+                    color=col, ls=st["ls"], lw=1.5, alpha=st["alpha"],
+                    label=label, marker=st["marker"], ms=3)
 
-            # Tendance
             valid = np.isfinite(lat_cp)
             if valid.sum() > 4:
-                sl, it, _, pv, _ = stats.linregress(
-                    years[valid], lat_cp[valid])
+                sl, it, _, pv, _ = stats.linregress(years[valid], lat_cp[valid])
                 trend_km = sl * DEG2KM
                 ax.plot(years, it + sl * years, color=col, ls=":",
                         lw=1.0, alpha=0.6)
-                txt = (f"{lname}: {trend_km:+.2f} km/an "
-                       f"(p={pv:.3f}{'*' if pv < 0.05 else ''})")
-                ax.annotate(txt, xy=(0.02, 0.05 if lname == "Brut" else 0.18),
-                            xycoords="axes fraction", fontsize=7,
-                            color=col, alpha=0.9)
+                trend_texts.append(
+                    f"{label}: {trend_km:+.2f} km/an "
+                    f"(p={pv:.3f}{'*' if pv < 0.05 else ''})"
+                )
 
-        ax.invert_yaxis()
+        # Annotations de tendance centrées en bas
+        for k, txt in enumerate(trend_texts):
+            ax.annotate(txt, xy=(0.02, 0.04 + k * 0.11),
+                        xycoords="axes fraction", fontsize=11,
+                        ha="left", color="0.25", alpha=0.9)
+
         ax.set_ylabel("Lat. moy. (°)", fontsize=9)
         ax.set_title(front, fontsize=10, fontweight="bold", loc="left")
-        ax.legend(fontsize=8, loc="upper right")
+        ax.legend(fontsize=12, loc="upper right")
+        ax.tick_params(labelsize=14)
         ax.grid(True, alpha=0.3)
 
     axes[-1].set_xlabel("Année", fontsize=9)
-    fname = f"{outdir}fronts_circumpolar_timeseries_{label}.png"
+    fname = f"{outdir}fronts_circumpolar_timeseries_OBS_NEMO.png"
     plt.tight_layout()
     plt.savefig(fname, dpi=CFG["fig_dpi"], bbox_inches="tight")
     plt.close()
@@ -819,7 +975,6 @@ def process_dataset(ssh_da, levels, label):
     print(f"\n--- {label} : figures ---")
     fig_spaghetti(ann_raw, ann_corr, cm_info, label, outdir)
     fig_variability_map(ann_corr, mean_corr, lon_arr, var_dict, label, outdir)
-    fig_circumpolar_timeseries(ann_raw, ann_corr, cm_info, label, outdir)
 
     # 6. CSV + console
     df = export_summary(var_dict, cm_info, ann_corr, label, outdir)
@@ -854,6 +1009,11 @@ def run():
     # ─── NEMO ─────────────────────────────────────────────────────────────
     ssh_nemo = load_nemo(CFG)
     res_nemo = process_dataset(ssh_nemo, CFG["levels_nemo"], "NEMO")
+
+    # ─── COMPARAISON σ(λ) OBS vs NEMO sur période commune ─────────────────
+    compare_sigma_obs_nemo(res_obs, res_nemo, CFG["outdir"])
+    # ─── SÉRIE TEMPORELLE CIRCUMPOLAIRE OBS vs NEMO ───────────────────────
+    fig_circumpolar_timeseries_combined(res_obs, res_nemo, CFG["outdir"])
 
     print("\n  Fichiers produits :")
     for f in sorted(os.listdir(CFG["outdir"])):
