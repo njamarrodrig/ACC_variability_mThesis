@@ -3,6 +3,7 @@
  
 | Fichier | Description |
 |---|---|
+| `JamarRodriguez_32251900_2026.pdf` | Document mémoire complet. |
 | `MEAN_SSH_NEMO.py` | Carte de la SSH moyenne (1991–2023) issue du modèle NEMO, projection polaire sud. |
 | `MEAN_SSH_OBS.py` | Carte de la SSH moyenne (2002–2018) des observations satéllitaire, projection polaire sud. |
 | `FRONT_SCHIAVON_NEMO.py` | Identification des fronts (SAF, PF, SACCF) dans NEMO par la méthode Sokolov & Rintoul (2009a)|
